@@ -3,21 +3,45 @@ const { analyzeCode } = require('./chatgpt');
 const fs = require('fs');
 const path = require('path');
 const git = require('simple-git');
+const { minimatch } = require('minimatch');
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') })
 
-async function getChangedFiles(baseBranch, featureBranch) {
-  // Initialize the git instance with the correct workspace directory
-  const gitInstance = git(getWorkspaceFolderPath());
-
-  // Get the list of file paths that have changed between the baseBranch and the featureBranch
-  const diffOutput = await gitInstance.diff(['--name-only', baseBranch, featureBranch]);
+async function getChangedFiles(gitInstance) {
+  const diffOutput = await gitInstance.diff(['--name-only']);
   console.log('Diff output:', diffOutput);
 
-  // Split the output by newline characters to create an array of file paths
-  const filePaths = diffOutput.trim().split('\n');
+  const untrackedFilesOutput = await gitInstance.raw(['ls-files', '--others', '--exclude-standard']);
+  console.log('Untracked files output:', untrackedFilesOutput);
+
+  let filePaths = diffOutput.trim().split('\n').concat(untrackedFilesOutput.trim().split('\n'));
+  filePaths = filePaths.filter(shouldAnalyzeFile);
+
   console.log('File paths in getChangedFiles:', filePaths);
 
   return filePaths;
+}
+
+async function getAllModifiedFilesInBranch(gitInstance) {
+  const diffOutput = await gitInstance.diff(['--name-only']);
+  console.log('Diff output:', diffOutput);
+
+  const untrackedFilesOutput = await gitInstance.raw(['ls-files', '--others', '--exclude-standard']);
+  console.log('Untracked files output:', untrackedFilesOutput);
+
+  let filePaths = diffOutput.trim().split('\n').concat(untrackedFilesOutput.trim().split('\n'));
+  filePaths = filePaths.filter(shouldAnalyzeFile);
+
+  console.log('File paths in getAllModifiedFilesInBranch:', filePaths);
+
+  return filePaths;
+}
+
+
+function shouldAnalyzeFile(filePath) {
+  const ignoredPatterns = ['*.json', '*.md', 'node_modules/*'];
+  const shouldAnalyze = !ignoredPatterns.some(pattern => minimatch(filePath, pattern));
+  console.log(`Should analyze ${filePath}? ${shouldAnalyze}`);
+  return shouldAnalyze;
 }
 
 async function getFileContent(filePath) {
@@ -27,10 +51,15 @@ async function getFileContent(filePath) {
   }
 
   const workspacePath = workspaceFolders[0].uri.fsPath;
-  const absoluteFilePath = path.join(workspacePath, filePath);
-  return fs.readFileSync(absoluteFilePath, 'utf8');
-}
+  const absoluteFilePath = path.isAbsolute(filePath) ? filePath : path.join(workspacePath, filePath);
 
+  try {
+    return fs.readFileSync(absoluteFilePath, 'utf8');
+  } catch (error) {
+    console.error(`Failed to read file at ${absoluteFilePath}: ${error.message}`);
+    return null;
+  }
+}
 
 function getWorkspaceFolderPath() {
   const workspaceFolders = vscode.workspace.workspaceFolders;
@@ -46,40 +75,71 @@ async function getCurrentBranch() {
   return currentBranch.current;
 }
 
-async function analyzeChangedFiles() {
-  const baseBranch = await getCurrentBranch();
-  const featureBranch = 'main';
+async function addReviewComments(filePath, review) {
+  const fileContent = await getFileContent(filePath);
+  if (fileContent === null) {
+    return;
+  }
 
-  const filePaths = await getChangedFiles(baseBranch, featureBranch);
-  console.log('File paths:', filePaths);
+  const commentedReview = '/* ChatGPT suggestion:\n' + review.replace(/\n/g, '\n * ') + '\n */\n';
+  const newFileContent = commentedReview + fileContent;
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  const workspacePath = workspaceFolders[0].uri.fsPath;
+  const absoluteFilePath = path.isAbsolute(filePath) ? filePath : path.join(workspacePath, filePath);
 
-  const fileContents = await Promise.all(filePaths.map(getFileContent));
-  console.log('File contents:', fileContents);
-
-  // Batch the file contents into smaller chunks, if needed
-  // Here, we are sending the content of each changed file in a separate API call for simplicity
-  const reviews = await Promise.all(fileContents.map(analyzeCode));
-  console.log('Reviews:', reviews);
-
-  // Combine the results
-  const combinedReview = reviews.join('\n\n');
-
-  // Display the combined review
-  vscode.window.showInformationMessage(`Code Review:\n${combinedReview}`);
+  fs.writeFileSync(absoluteFilePath, newFileContent);
 }
 
 function activate(context) {
-    console.log('Command "extension.analyzeCode" has been called.');
+  console.log('Extension "chatgpt-code-review" is now active.');
 
-    let disposable = vscode.commands.registerCommand('extension.analyzeCode', async function () {
-        await analyzeChangedFiles();
+  let disposable = vscode.commands.registerCommand('extension.analyzeCode', async function () {
+      const workspaceFolders = vscode.workspace.workspaceFolders;
+
+      if (!workspaceFolders) {
+          vscode.window.showErrorMessage('No workspace is open.');
+          return;
+      }
+
+      const workspacePath = workspaceFolders[0].uri.fsPath;
+
+      const gitInstance = git(workspacePath);
+      const currentBranch = await getCurrentBranch();
+      console.log(`Current branch: ${currentBranch}`);
+
+      const analyzeScope = vscode.workspace.getConfiguration('chatgpt-code-review').get('analyzeScope');
+
+      let filePaths;
+      if (analyzeScope === 'all-changed-files-in-current-branch') {
+        filePaths = await getAllModifiedFilesInBranch(gitInstance);
+      } else {
+        filePaths = await getChangedFiles(gitInstance);
+      }
+      filePaths = filePaths.filter(shouldAnalyzeFile);
+      console.log(`File paths: ${filePaths}`);
+
+      const fileContents = await Promise.all(filePaths.map(filePath => getFileContent(path.join(workspacePath, filePath))));
+
+      const reviews = await Promise.all(fileContents.map(analyzeCode));
+
+      for (let i = 0; i < filePaths.length; i++) {
+        const filePath = filePaths[i];
+        const review = reviews[i];
+
+        await addReviewComments(filePath, review);
+      }
   });
 
   context.subscriptions.push(disposable);
 }
 
 function deactivate() {
+  if (commentController) {
+    commentController.dispose();
+  }
 }
 
-exports.deactivate = deactivate;
-exports.activate = activate;
+module.exports = {
+  activate,
+  deactivate
+};
