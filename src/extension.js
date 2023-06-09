@@ -1,142 +1,128 @@
 const vscode = require('vscode');
-const { analyzeCode } = require('./chatgpt');
-const fs = require('fs');
 const path = require('path');
 const git = require('simple-git');
-const { minimatch } = require('minimatch');
+const ChangedFilesProvider = require('./providers/ChangedFilesProvider');
+const CommentsProvider = require('./providers/CommentsProvider');
+const SummaryProvider = require('./providers/SummaryProvider');
+const { analyzeCode } = require('./chatgpt');
+const {
+  shouldAnalyzeFile,
+  getGitRepoRoot,
+  getFileContent,
+  getAllModifiedFilesInBranch,
+  getChangedFiles
+} = require('./utils');
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') })
 
-async function getChangedFiles(gitInstance) {
-  const diffOutput = await gitInstance.diff(['--name-only']);
-  console.log('Diff output:', diffOutput);
-
-  const untrackedFilesOutput = await gitInstance.raw(['ls-files', '--others', '--exclude-standard']);
-  console.log('Untracked files output:', untrackedFilesOutput);
-
-  let filePaths = diffOutput.trim().split('\n').concat(untrackedFilesOutput.trim().split('\n'));
-  filePaths = filePaths.filter(shouldAnalyzeFile);
-
-  console.log('File paths in getChangedFiles:', filePaths);
-
-  return filePaths;
-}
-
-async function getAllModifiedFilesInBranch(gitInstance) {
-  const diffOutput = await gitInstance.diff(['--name-only']);
-  console.log('Diff output:', diffOutput);
-
-  const untrackedFilesOutput = await gitInstance.raw(['ls-files', '--others', '--exclude-standard']);
-  console.log('Untracked files output:', untrackedFilesOutput);
-
-  let filePaths = diffOutput.trim().split('\n').concat(untrackedFilesOutput.trim().split('\n'));
-  filePaths = filePaths.filter(shouldAnalyzeFile);
-
-  console.log('File paths in getAllModifiedFilesInBranch:', filePaths);
-
-  return filePaths;
-}
-
-
-function shouldAnalyzeFile(filePath) {
-  const ignoredPatterns = ['*.json', '*.md', 'node_modules/*'];
-  const shouldAnalyze = !ignoredPatterns.some(pattern => minimatch(filePath, pattern));
-  console.log(`Should analyze ${filePath}? ${shouldAnalyze}`);
-  return shouldAnalyze;
-}
-
-async function getFileContent(filePath) {
-  const workspaceFolders = vscode.workspace.workspaceFolders;
-  if (!workspaceFolders || workspaceFolders.length === 0) {
-    throw new Error('No workspace folder found');
-  }
-
-  const workspacePath = workspaceFolders[0].uri.fsPath;
-  const absoluteFilePath = path.isAbsolute(filePath) ? filePath : path.join(workspacePath, filePath);
-
-  try {
-    return fs.readFileSync(absoluteFilePath, 'utf8');
-  } catch (error) {
-    console.error(`Failed to read file at ${absoluteFilePath}: ${error.message}`);
-    return null;
-  }
-}
-
-function getWorkspaceFolderPath() {
-  const workspaceFolders = vscode.workspace.workspaceFolders;
-  if (!workspaceFolders) {
-    return null;
-  }
-  return workspaceFolders[0].uri.fsPath;
-}
-
-async function getCurrentBranch() {
-  const gitInstance = git(getWorkspaceFolderPath());
-  const currentBranch = await gitInstance.branch();
-  return currentBranch.current;
-}
+// Create this outside the activate function so it's accessible elsewhere
+const commentsProvider = new CommentsProvider();
 
 async function addReviewComments(filePath, review) {
-  const fileContent = await getFileContent(filePath);
-  if (fileContent === null) {
-    return;
-  }
+  console.log('addReviewComments', filePath)
 
-  const commentedReview = '/* ChatGPT suggestion:\n' + review.replace(/\n/g, '\n * ') + '\n */\n';
-  const newFileContent = commentedReview + fileContent;
-  const workspaceFolders = vscode.workspace.workspaceFolders;
-  const workspacePath = workspaceFolders[0].uri.fsPath;
-  const absoluteFilePath = path.isAbsolute(filePath) ? filePath : path.join(workspacePath, filePath);
-
-  fs.writeFileSync(absoluteFilePath, newFileContent);
+  // Update this to write to the comments JSON file instead of the source code file
+  commentsProvider.updateComments(filePath, review);
 }
 
+/**
+ * @param {vscode.ExtensionContext} context
+ */
 function activate(context) {
   console.log('Extension "chatgpt-code-review" is now active.');
 
-  let disposable = vscode.commands.registerCommand('extension.analyzeCode', async function () {
-      const workspaceFolders = vscode.workspace.workspaceFolders;
+  // Create and register the TreeDataProviders
+  const changedFilesProvider = new ChangedFilesProvider(commentsProvider.comments);
 
-      if (!workspaceFolders) {
-          vscode.window.showErrorMessage('No workspace is open.');
-          return;
-      }
+  vscode.window.registerTreeDataProvider('changedFiles', changedFilesProvider);
+  vscode.window.registerTreeDataProvider('comments', commentsProvider);
 
-      const workspacePath = workspaceFolders[0].uri.fsPath;
+  const summaryProvider = new SummaryProvider();
+  vscode.window.registerTreeDataProvider('summary', summaryProvider);
 
-      const gitInstance = git(workspacePath);
-      const currentBranch = await getCurrentBranch();
-      console.log(`Current branch: ${currentBranch}`);
-
-      const analyzeScope = vscode.workspace.getConfiguration('chatgpt-code-review').get('analyzeScope');
-
-      let filePaths;
-      if (analyzeScope === 'all-changed-files-in-current-branch') {
-        filePaths = await getAllModifiedFilesInBranch(gitInstance);
-      } else {
-        filePaths = await getChangedFiles(gitInstance);
-      }
-      filePaths = filePaths.filter(shouldAnalyzeFile);
-      console.log(`File paths: ${filePaths}`);
-
-      const fileContents = await Promise.all(filePaths.map(filePath => getFileContent(path.join(workspacePath, filePath))));
-
-      const reviews = await Promise.all(fileContents.map(analyzeCode));
-
-      for (let i = 0; i < filePaths.length; i++) {
-        const filePath = filePaths[i];
-        const review = reviews[i];
-
-        await addReviewComments(filePath, review);
-      }
+  // Register the 'chatgpt-code-review.openComments' command
+  const openCommentsCommand = vscode.commands.registerCommand('chatgpt-code-review.openComments', async (uri) => {
+      vscode.window.showTextDocument(uri);
   });
 
-  context.subscriptions.push(disposable);
+  // Register the 'chatgpt-comments' scheme
+  const commentsProviderRegistration = vscode.workspace.registerTextDocumentContentProvider('chatgpt-comments', commentsProvider);
+
+
+  let disposable = vscode.commands.registerCommand('extension.analyzeCode', async function () {
+    const workspaceFolders = vscode.workspace.workspaceFolders;
+
+    if (!workspaceFolders) {
+        vscode.window.showErrorMessage('No workspace is open.');
+        return;
+    }
+
+    
+    try {
+      gitRepoRoot = getGitRepoRoot();
+    } catch (error) {
+      vscode.window.showErrorMessage(error.message);
+      return;
+    }
+    console.log(`Git Repo Root in activate: ${gitRepoRoot}`);
+
+    const gitInstance = git(gitRepoRoot);
+    console.log(`Current instance: ${Object.keys(gitInstance)}`, Object.values(gitInstance));
+    const analyzeScope = vscode.workspace.getConfiguration('chatgpt-code-review').get('analyzeScope');
+
+    let filePaths;
+    if (analyzeScope === 'all-changed-files-in-current-branch') {
+      filePaths = await getAllModifiedFilesInBranch(gitInstance);
+      console.log('filePaths 1', filePaths)
+    } else {
+      filePaths = await getChangedFiles(gitInstance, gitRepoRoot);
+      console.log('filePaths 2', filePaths)
+
+    }
+    filePaths = filePaths.filter(shouldAnalyzeFile);
+
+    console.log(`File paths: ${filePaths}`);
+
+    const fileContents = await Promise.all(filePaths.map(filePath => {
+      console.log('fileContents: ', filePath)
+      return getFileContent(filePath)
+    }));
+
+    // add a delay between each review request
+    const reviews = [];
+    for (let fileContent of fileContents) {
+      reviews.push(await analyzeCode(fileContent));
+      await new Promise(resolve => setTimeout(resolve, 100)); // delay of 100ms
+    }
+
+    for (let i = 0; i < filePaths.length; i++) {
+      const filePath = filePaths[i];
+      const review = reviews[i];
+      console.log('disposable', filePath)
+
+      await addReviewComments(filePath, review);
+      
+      // After performing the analysis and updating the JSON file with the reviews,
+      // refresh the ChatGPTCommentsProvider and ChangedFilesProvider to reflect the new state.
+      const uri = vscode.Uri.file('/path/to/your/file');
+      commentsProvider.refresh(uri);
+    }
+
+
+    changedFilesProvider.refresh();
+
+    // Set the isAnalyzing context value to true
+    vscode.commands.executeCommand('setContext', 'chatgpt-code-review:isAnalyzing', true);
+  });
+
+  // Add the new command and registration to the extension's subscriptions so they are properly disposed of when the extension is deactivated
+  context.subscriptions.push(vscode.commands.registerCommand('extension.openFile', (filePath) => {
+    vscode.workspace.openTextDocument(vscode.Uri.file(filePath)).then((doc) => {
+        vscode.window.showTextDocument(doc);
+    });
+  }));
 }
 
 function deactivate() {
-  if (commentController) {
-    commentController.dispose();
-  }
 }
 
 module.exports = {
