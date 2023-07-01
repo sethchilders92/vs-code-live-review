@@ -21,6 +21,7 @@ async function getConfig() {
 
   // Determine the path to the configuration file
   const configFile = path.join(workspaceFolders[0].uri.fsPath, 'chatgptconfig.json');
+
   // If the configuration file doesn't exist, create it with the default configuration
   if (!fs.existsSync(configFile)) {
     fs.writeFileSync(configFile, JSON.stringify(defaultConfig, null, 2));
@@ -28,6 +29,7 @@ async function getConfig() {
 
   // Read the content of the configuration file
   const content = await fs.promises.readFile(configFile, 'utf-8');
+  
   // Parse and return the configuration object
   return JSON.parse(content);
 }

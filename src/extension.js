@@ -5,6 +5,8 @@ const ChangedFilesProvider = require('./providers/ChangedFilesProvider');
 const CommentsProvider = require('./providers/CommentsProvider');
 const SummaryProvider = require('./providers/SummaryProvider');
 const { analyzeCode } = require('./chatgpt');
+const decorators = require('./decorators');
+
 const {
   shouldAnalyzeFile,
   getGitRepoRoot,
@@ -14,8 +16,12 @@ const {
 } = require('./utils');
 require('dotenv').config({ path: path.resolve(__dirname, '../.env') })
 
+const rootPath = vscode.workspace.workspaceFolders[0].uri.fsPath; 
+
+const filePath = path.join(rootPath, '.vscode', 'chatgpt-comments.json');
+
 // Create this outside the activate function so it's accessible elsewhere
-const commentsProvider = new CommentsProvider();
+const commentsProvider = new CommentsProvider(filePath);
 
 async function addReviewComments(filePath, review) {
   console.log('addReviewComments', filePath)
@@ -29,12 +35,18 @@ async function addReviewComments(filePath, review) {
  */
 function activate(context) {
   console.log('Extension "chatgpt-code-review" is now active.');
+  decorators.activate(context);
 
   // Create and register the TreeDataProviders
   const changedFilesProvider = new ChangedFilesProvider(commentsProvider.comments);
 
   vscode.window.registerTreeDataProvider('changedFiles', changedFilesProvider);
   vscode.window.registerTreeDataProvider('comments', commentsProvider);
+  
+  // Listen for the 'changed' event and refresh the view
+  commentsProvider.on('changed', () => {
+    changedFilesProvider.refresh();
+  });
 
   const summaryProvider = new SummaryProvider();
   vscode.window.registerTreeDataProvider('summary', summaryProvider);

@@ -22,9 +22,9 @@ async function generateReview(prompt) {
     try {
       console.log('Making a request...');
       const response = await openai.createChatCompletion({
-        model: 'gpt-3.5-turbo',
+        model: 'gpt-3.5-turbo-16k',
         messages: [{ role: 'user', content: prompt }],
-        max_tokens: 400,
+        max_tokens: 4096,
         n: 1,
         stop: null,
         temperature: 0.7,
